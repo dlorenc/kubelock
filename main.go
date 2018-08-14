@@ -24,7 +24,10 @@ var (
 	namespace  string
 	clientName string
 	kubeconfig *string
+	hold       bool
 )
+
+const ttl = 60 * time.Second
 
 func setupFlags() {
 	hostname, err := os.Hostname()
@@ -34,6 +37,7 @@ func setupFlags() {
 	flag.StringVar(&lockName, "lockname", "kubelock", "name of the lock to aquire")
 	flag.StringVar(&namespace, "namespace", "default", "namespace of the lock to aquire")
 	flag.StringVar(&clientName, "clientName", hostname, "name of the lock holder, defaults to hostname")
+	flag.BoolVar(&hold, "hold", false, "whether to hold the lock continuously")
 
 	if home := homeDir(); home != "" {
 		kubeconfig = flag.String("kubeconfig", filepath.Join(home, ".kube", "config"), "(optional) absolute path to the kubeconfig file")
@@ -77,6 +81,28 @@ func main() {
 	}
 
 	fmt.Println("Got lock!")
+	if hold {
+		fmt.Println("refreshing lock...")
+		t := time.NewTicker(ttl / 2)
+		for {
+			select {
+			case <-t.C:
+				if err := refresh(clientset, cm); err != nil {
+					panic(err)
+				}
+				fmt.Println("refreshed the lock")
+			}
+		}
+	}
+}
+
+func refresh(clientset *kubernetes.Clientset, cm *v1.ConfigMap) error {
+	now := time.Now().UTC()
+	newExpiry := now.Add(ttl).Unix()
+	cm.Annotations["expiry"] = strconv.FormatInt(newExpiry, 10)
+	cm.Annotations["holder"] = clientName
+
+	return UpdateLock(clientset, cm)
 }
 
 func homeDir() string {
@@ -132,7 +158,7 @@ func maybeGetLock(clientset *kubernetes.Clientset, cm *v1.ConfigMap) error {
 		return err
 	}
 
-	newExpiry := now.Add(60 * time.Second).Unix()
+	newExpiry := now.Add(ttl).Unix()
 	cm.Annotations["expiry"] = strconv.FormatInt(newExpiry, 10)
 	cm.Annotations["holder"] = clientName
 
